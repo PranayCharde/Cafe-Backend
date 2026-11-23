@@ -1,7 +1,7 @@
 
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "Cafe-Backend",
+  "name": "cafe-backend",
   "compatibility_date": "2026-11-21",
   "assets": {
     "directory": "./dist"
