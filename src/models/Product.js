@@ -12,6 +12,7 @@ const productSchema = new mongoose.Schema(
     isSpicy: { type: Boolean, default: false },
     isPopular: { type: Boolean, default: false },
     available: { type: Boolean, default: true },
+    availabilityNote: { type: String, default: "" },
   },
   { timestamps: true }
 );
@@ -26,4 +27,3 @@ productSchema.set("toJSON", {
 });
 
 module.exports = mongoose.model("Product", productSchema);
-

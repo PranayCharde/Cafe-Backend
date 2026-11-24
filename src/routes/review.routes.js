@@ -5,19 +5,20 @@ const { authenticateToken, requireAdmin } = require("../middleware/auth");
 const router = express.Router();
 
 /**
- * GET /api/reviews - Approved customer reviews
+ * Get approved customer reviews
  */
 router.get("/", async (req, res) => {
   try {
     const reviews = await Review.find({ approved: true }).sort({ createdAt: -1 });
-    res.json(reviews);
+    res.json({ data: reviews });
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch reviews" });
+    console.error("Get reviews error:", error);
+    res.status(500).json({ message: "Failed to fetch reviews." });
   }
 });
 
 /**
- * POST /api/reviews - Submit a new review
+ * Submit a review
  */
 router.post("/", async (req, res) => {
   try {
@@ -27,32 +28,37 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ message: "Name, rating and message are required." });
     }
 
-    const review = await Review.create({
+    const created = await Review.create({
       name: name.trim(),
       rating: parseInt(rating, 10),
       message: message.trim(),
       city: city ? city.trim() : "",
-      approved: true,
+      approved: true, // auto-approve for demo
     });
 
     res.status(201).json({
-      message: "Thank you! Your review has been submitted.",
-      review,
+      message: "Review submitted successfully! Thank you for your feedback.",
+      data: created,
     });
   } catch (error) {
-    res.status(500).json({ message: "Failed to submit review" });
+    console.error("Create review error:", error);
+    res.status(500).json({ message: "Failed to submit review." });
   }
 });
 
 /**
- * DELETE /api/reviews/:id - ADMIN ONLY
+ * Delete a review (Admin)
  */
 router.delete("/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    await Review.findByIdAndDelete(req.params.id);
-    res.json({ message: `Review deleted` });
+    const deleted = await Review.findByIdAndDelete(req.params.id);
+    if (!deleted) {
+      return res.status(404).json({ message: "Review not found" });
+    }
+    res.json({ message: "Review deleted successfully" });
   } catch (error) {
-    res.status(500).json({ message: "Failed to delete review" });
+    console.error("Delete review error:", error);
+    res.status(500).json({ message: "Failed to delete review." });
   }
 });
 

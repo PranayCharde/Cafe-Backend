@@ -15,7 +15,6 @@ async function connectDB() {
   try {
     await mongoose.connect(MONGODB_URI);
     console.log(`🍃 Connected to MongoDB: ${MONGODB_URI}`);
-
     await autoSeedDatabase();
   } catch (error) {
     console.error("❌ MongoDB connection error:", error.message);
@@ -41,20 +40,20 @@ async function autoSeedDatabase() {
     }
 
     // 2. Seed Categories
-    const catCount = await Category.countDocuments();
-    if (catCount === 0) {
+    const categoryCount = await Category.countDocuments();
+    if (categoryCount === 0) {
       await Category.insertMany(seedData.categories);
       console.log(`Seeded ${seedData.categories.length} categories.`);
     }
 
     // 3. Seed Products
-    const prodCount = await Product.countDocuments();
-    if (prodCount === 0) {
+    const productCount = await Product.countDocuments();
+    if (productCount === 0) {
       await Product.insertMany(seedData.products);
-      console.log(`Seeded ${seedData.products.length} menu products.`);
+      console.log(`Seeded ${seedData.products.length} products.`);
     }
 
-    // 4. Seed Tables
+    // 4. Seed Tables (1 to 12)
     const tableCount = await Table.countDocuments();
     if (tableCount === 0) {
       const tablesToInsert = [];
@@ -70,24 +69,18 @@ async function autoSeedDatabase() {
     }
 
     // 5. Seed Reviews
-    const revCount = await Review.countDocuments();
-    if (revCount === 0) {
+    const reviewCount = await Review.countDocuments();
+    if (reviewCount === 0) {
       await Review.insertMany(seedData.reviews);
-      console.log(`Seeded ${seedData.reviews.length} customer reviews.`);
+      console.log(`Seeded ${seedData.reviews.length} reviews.`);
     }
+
+    console.log("✅ MongoDB Database initialization and auto-seed complete.");
   } catch (err) {
-    console.warn("Seeding notice:", err.message);
+    console.error("⚠️ Error auto-seeding MongoDB:", err.message);
   }
 }
 
 module.exports = {
   connectDB,
-  User,
-  Category,
-  Product,
-  Table,
-  Order: require("../models/Order"),
-  Reservation: require("../models/Reservation"),
-  Review,
-  Contact: require("../models/Contact"),
 };

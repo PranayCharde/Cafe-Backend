@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const Category = require("../models/Category");
 const Product = require("../models/Product");
 const { authenticateToken, requireAdmin } = require("../middleware/auth");
@@ -6,32 +7,60 @@ const { authenticateToken, requireAdmin } = require("../middleware/auth");
 const router = express.Router();
 
 /**
- * GET /api/menu/categories
+ * Get all menu categories
  */
 router.get("/categories", async (req, res) => {
   try {
-    const categories = await Category.find().sort({ id: 1 });
-    res.json(categories);
+    const categories = await Category.find().sort({ id: 1, _id: 1 });
+    res.json({ data: categories });
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch categories" });
+    console.error("Get categories error:", error);
+    res.status(500).json({ message: "Failed to fetch categories." });
   }
 });
 
 /**
- * GET /api/menu/products
+ * Create a new category (Admin)
+ */
+router.post("/categories", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { name, slug, description, imageUrl } = req.body;
+
+    if (!name || !slug) {
+      return res.status(400).json({ message: "Name and slug are required." });
+    }
+
+    const created = await Category.create({
+      name: name.trim(),
+      slug: slug.trim().toLowerCase(),
+      description: description ? description.trim() : "",
+      imageUrl: imageUrl ? imageUrl.trim() : "",
+    });
+
+    res.status(201).json({ message: "Category created", data: created });
+  } catch (error) {
+    console.error("Create category error:", error);
+    res.status(500).json({ message: "Failed to create category." });
+  }
+});
+
+/**
+ * Get menu products with filtering
  */
 router.get("/products", async (req, res) => {
   try {
-    const { categoryId, isPopular, search } = req.query;
-
+    const { categoryId, category, search, available, isVeg } = req.query;
     const filter = {};
 
-    if (categoryId && categoryId !== "all") {
-      filter.categoryId = parseInt(categoryId, 10);
-    }
+    if (categoryId) filter.categoryId = parseInt(categoryId, 10);
+    if (available !== undefined) filter.available = available === "true" || available === "1";
+    if (isVeg !== undefined) filter.isVeg = isVeg === "true" || isVeg === "1";
 
-    if (isPopular === "true" || isPopular === "1") {
-      filter.isPopular = true;
+    if (category) {
+      const cat = await Category.findOne({ slug: category.toLowerCase() });
+      if (cat) {
+        filter.categoryId = cat.id;
+      }
     }
 
     if (search) {
@@ -41,95 +70,147 @@ router.get("/products", async (req, res) => {
       ];
     }
 
-    const products = await Product.find(filter).sort({ id: 1 });
-    res.json(products);
+    const products = await Product.find(filter).sort({ categoryId: 1, id: 1 });
+    res.json({ data: products });
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch products" });
+    console.error("Get products error:", error);
+    res.status(500).json({ message: "Failed to fetch menu items." });
   }
 });
 
 /**
- * GET /api/menu/products/:id
+ * Get product by ID
  */
 router.get("/products/:id", async (req, res) => {
   try {
-    const id = parseInt(req.params.id, 10);
-    const product = isNaN(id)
-      ? await Product.findById(req.params.id)
-      : await Product.findOne({ id });
+    const { id } = req.params;
+    let product = null;
+    if (mongoose.Types.ObjectId.isValid(id)) {
+      product = await Product.findById(id);
+    }
+    if (!product) {
+      product = await Product.findOne({ id: parseInt(id, 10) || -1 });
+    }
 
     if (!product) {
-      return res.status(404).json({ message: "Product not found" });
+      return res.status(404).json({ message: "Menu item not found" });
     }
-    res.json(product);
+
+    res.json({ data: product });
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch product" });
+    console.error("Get product error:", error);
+    res.status(500).json({ message: "Failed to fetch product details." });
   }
 });
 
 /**
- * ADMIN ONLY: Create Product
+ * Create new product (Admin)
  */
 router.post("/products", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const { categoryId, name, description, price, imageUrl, isVeg, isSpicy, isPopular, available } = req.body;
+    const {
+      categoryId,
+      category,
+      name,
+      description,
+      price,
+      imageUrl,
+      image,
+      isVeg,
+      isSpicy,
+      isPopular,
+      available,
+    } = req.body;
 
-    if (!categoryId || !name || !price) {
-      return res.status(400).json({ message: "Category, name and price are required." });
+    if (!name || price === undefined) {
+      return res.status(400).json({ message: "Name and Price are required." });
     }
 
-    const highest = await Product.findOne().sort("-id");
-    const newId = highest && highest.id ? highest.id + 1 : 1;
+    let resolvedCatId = parseInt(categoryId, 10) || 1;
+    if (category) {
+      const catObj = await Category.findOne({ slug: String(category).toLowerCase() });
+      if (catObj && catObj.id) resolvedCatId = catObj.id;
+    }
 
-    const product = await Product.create({
-      id: newId,
-      categoryId: parseInt(categoryId, 10),
+    // Assign sequential numeric id
+    const highest = await Product.findOne().sort("-id");
+    const nextId = highest && highest.id ? highest.id + 1 : 101;
+
+    const created = await Product.create({
+      id: nextId,
+      categoryId: resolvedCatId,
       name: name.trim(),
-      description: description || "",
+      description: description ? description.trim() : "",
       price: String(price),
-      imageUrl: imageUrl || "",
+      imageUrl: imageUrl || image || "",
       isVeg: isVeg !== undefined ? Boolean(isVeg) : true,
-      isSpicy: isSpicy !== undefined ? Boolean(isSpicy) : false,
-      isPopular: isPopular !== undefined ? Boolean(isPopular) : false,
+      isSpicy: Boolean(isSpicy),
+      isPopular: Boolean(isPopular),
       available: available !== undefined ? Boolean(available) : true,
+      availabilityNote: req.body.availabilityNote ? req.body.availabilityNote.trim() : "",
     });
 
-    res.status(201).json({ message: "Product created", product });
+    res.status(201).json({ message: "Menu item created successfully", data: created });
   } catch (error) {
-    res.status(500).json({ message: "Failed to create product" });
+    console.error("Create product error:", error);
+    res.status(500).json({ message: "Failed to create menu item." });
   }
 });
 
 /**
- * ADMIN ONLY: Update Product
+ * Update product (Admin)
  */
 router.put("/products/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const id = parseInt(req.params.id, 10);
-    const query = isNaN(id) ? { _id: req.params.id } : { id };
-
-    const updated = await Product.findOneAndUpdate(query, req.body, { new: true });
-    if (!updated) {
-      return res.status(404).json({ message: "Product not found" });
+    const { id } = req.params;
+    const updateData = { ...req.body };
+    if (updateData.image && !updateData.imageUrl) {
+      updateData.imageUrl = updateData.image;
     }
-    res.json({ message: "Product updated", product: updated });
+
+    let updated = null;
+    if (mongoose.Types.ObjectId.isValid(id)) {
+      updated = await Product.findByIdAndUpdate(id, updateData, { new: true });
+    }
+    if (!updated) {
+      updated = await Product.findOneAndUpdate({ id: parseInt(id, 10) || -1 }, updateData, {
+        new: true,
+      });
+    }
+
+    if (!updated) {
+      return res.status(404).json({ message: "Menu item not found" });
+    }
+
+    res.json({ message: "Menu item updated", data: updated });
   } catch (error) {
-    res.status(500).json({ message: "Failed to update product" });
+    console.error("Update product error:", error);
+    res.status(500).json({ message: "Failed to update menu item." });
   }
 });
 
 /**
- * ADMIN ONLY: Delete Product
+ * Delete product (Admin)
  */
 router.delete("/products/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const id = parseInt(req.params.id, 10);
-    const query = isNaN(id) ? { _id: req.params.id } : { id };
+    const { id } = req.params;
+    let deleted = null;
+    if (mongoose.Types.ObjectId.isValid(id)) {
+      deleted = await Product.findByIdAndDelete(id);
+    }
+    if (!deleted) {
+      deleted = await Product.findOneAndDelete({ id: parseInt(id, 10) || -1 });
+    }
 
-    await Product.findOneAndDelete(query);
-    res.json({ message: `Product #${req.params.id} deleted` });
+    if (!deleted) {
+      return res.status(404).json({ message: "Menu item not found" });
+    }
+
+    res.json({ message: "Menu item deleted successfully" });
   } catch (error) {
-    res.status(500).json({ message: "Failed to delete product" });
+    console.error("Delete product error:", error);
+    res.status(500).json({ message: "Failed to delete menu item." });
   }
 });
 

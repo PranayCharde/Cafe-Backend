@@ -2,9 +2,49 @@ const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
-const { JWT_SECRET, authenticateToken } = require("../middleware/auth");
+const { JWT_SECRET, authenticateToken, requireAdmin } = require("../middleware/auth");
 
 const router = express.Router();
+
+// In-memory rate limiter for admin login brute-force protection
+const loginAttempts = new Map();
+const MAX_ATTEMPTS = 5;
+const LOCKOUT_TIME_MS = 15 * 60 * 1000; // 15 minutes
+
+function checkLoginRateLimit(req, res, next) {
+  const ip = req.ip || req.connection.remoteAddress || "global";
+  const record = loginAttempts.get(ip);
+
+  if (record) {
+    const timePassed = Date.now() - record.lastAttempt;
+    if (timePassed < LOCKOUT_TIME_MS && record.count >= MAX_ATTEMPTS) {
+      const minutesRemaining = Math.ceil((LOCKOUT_TIME_MS - timePassed) / 60000);
+      return res.status(429).json({
+        message: `Too many failed login attempts. IP temporarily locked out for security. Try again in ${minutesRemaining} minute(s).`,
+      });
+    }
+
+    if (timePassed >= LOCKOUT_TIME_MS) {
+      // Reset after lockout expires
+      loginAttempts.delete(ip);
+    }
+  }
+
+  next();
+}
+
+function recordFailedAttempt(req) {
+  const ip = req.ip || req.connection.remoteAddress || "global";
+  const record = loginAttempts.get(ip) || { count: 0, lastAttempt: Date.now() };
+  record.count += 1;
+  record.lastAttempt = Date.now();
+  loginAttempts.set(ip, record);
+}
+
+function clearFailedAttempts(req) {
+  const ip = req.ip || req.connection.remoteAddress || "global";
+  loginAttempts.delete(ip);
+}
 
 /**
  * Customer Quick Login / Register
@@ -56,9 +96,9 @@ router.post("/customer-login", async (req, res) => {
 });
 
 /**
- * Admin Login
+ * Admin Login (Rate-limited, brute-force secured)
  */
-router.post("/admin-login", async (req, res) => {
+router.post("/admin-login", checkLoginRateLimit, async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -69,18 +109,23 @@ router.post("/admin-login", async (req, res) => {
     const admin = await User.findOne({ email: email.trim().toLowerCase(), role: "admin" });
 
     if (!admin) {
-      return res.status(401).json({ message: "Invalid admin credentials" });
+      recordFailedAttempt(req);
+      return res.status(401).json({ message: "Invalid administrator credentials" });
     }
 
     const isMatch = bcrypt.compareSync(password, admin.password);
     if (!isMatch) {
-      return res.status(401).json({ message: "Invalid admin credentials" });
+      recordFailedAttempt(req);
+      return res.status(401).json({ message: "Invalid administrator credentials" });
     }
+
+    // Clear failed attempts on valid login
+    clearFailedAttempts(req);
 
     const token = jwt.sign(
       { id: admin._id, name: admin.name, email: admin.email, role: "admin" },
       JWT_SECRET,
-      { expiresIn: "1d" }
+      { expiresIn: "1d" } // Session token expires in 24 hours
     );
 
     res.json({
@@ -112,6 +157,44 @@ router.get("/me", authenticateToken, async (req, res) => {
     res.json({ user });
   } catch (err) {
     res.status(500).json({ message: "Failed to fetch user" });
+  }
+});
+
+/**
+ * Change Administrator Password
+ * Secure endpoint requiring active admin session & validation of existing password
+ */
+router.post("/change-password", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ message: "Current password and new password are required." });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({ message: "New password must be at least 8 characters long." });
+    }
+
+    const admin = await User.findById(req.user.id);
+    if (!admin) {
+      return res.status(404).json({ message: "Admin account not found." });
+    }
+
+    const isMatch = bcrypt.compareSync(currentPassword, admin.password);
+    if (!isMatch) {
+      return res.status(401).json({ message: "Current password verification failed." });
+    }
+
+    const salt = bcrypt.genSaltSync(10);
+    admin.password = bcrypt.hashSync(newPassword, salt);
+    await admin.save();
+
+    console.log(`🔒 Administrator password successfully updated for ${admin.email}`);
+    res.json({ message: "Administrator password updated successfully." });
+  } catch (error) {
+    console.error("Change password error:", error);
+    res.status(500).json({ message: "Failed to update password." });
   }
 });
 

@@ -1,5 +1,4 @@
 const express = require("express");
-const QRCode = require("qrcode");
 const Table = require("../models/Table");
 const Order = require("../models/Order");
 const { authenticateToken, requireAdmin } = require("../middleware/auth");
@@ -7,145 +6,146 @@ const { authenticateToken, requireAdmin } = require("../middleware/auth");
 const router = express.Router();
 
 /**
- * GET /api/tables - Get all tables with real-time occupancy and active order metrics
+ * Get all tables with real-time status and active table orders
  */
 router.get("/", async (req, res) => {
   try {
     const tables = await Table.find().sort({ tableNumber: 1 });
+    const activeOrders = await Order.find({
+      orderType: "dine-in",
+      status: { $in: ["pending", "preparing", "ready"] },
+    });
 
-    // Populate active orders for each table
-    const populated = await Promise.all(
-      tables.map(async (table) => {
-        const activeOrders = await Order.find({
-          tableNumber: table.tableNumber,
-          status: { $in: ["pending", "preparing", "ready"] },
-        }).sort({ createdAt: -1 });
+    const enriched = tables.map((tbl) => {
+      const tblObj = tbl.toJSON();
+      const currentOrders = activeOrders.filter(
+        (o) => Number(o.tableNumber) === Number(tbl.tableNumber)
+      );
+      return {
+        ...tblObj,
+        currentOrders,
+        activeOrdersCount: currentOrders.length,
+      };
+    });
 
-        const latestOrder = activeOrders[0] || null;
-
-        return {
-          id: table._id,
-          tableNumber: table.tableNumber,
-          capacity: table.capacity,
-          status: table.status,
-          activeOrdersCount: activeOrders.length,
-          latestOrderId: latestOrder ? latestOrder.orderId : null,
-          seatedCustomerName: latestOrder ? latestOrder.customerName : null,
-          createdAt: table.createdAt,
-        };
-      })
-    );
-
-    res.json({ tables: populated });
+    res.json({ data: enriched });
   } catch (error) {
-    console.error("Fetch tables error:", error);
-    res.status(500).json({ message: "Failed to fetch tables" });
+    console.error("Get tables error:", error);
+    res.status(500).json({ message: "Failed to fetch tables list." });
   }
 });
 
 /**
- * POST /api/tables/generate-qr - ADMIN ONLY: Generate QR Code
- */
-router.post("/generate-qr", authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const { tableNumber, baseUrl } = req.body;
-
-    if (!tableNumber) {
-      return res.status(400).json({ message: "Table number is required" });
-    }
-
-    const host = baseUrl || "http://localhost:5000";
-    const targetUrl = `${host}/table/${tableNumber}`;
-
-    const qrDataUrl = await QRCode.toDataURL(targetUrl, {
-      width: 450,
-      margin: 2,
-      color: {
-        dark: "#2b1a12",
-        light: "#ffffff",
-      },
-    });
-
-    res.json({
-      success: true,
-      tableNumber,
-      targetUrl,
-      qrDataUrl,
-      generatedBy: req.user.name,
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error) {
-    console.error("QR Generation error:", error);
-    res.status(500).json({ message: "Failed to generate table QR code" });
-  }
-});
-
-/**
- * POST /api/tables - ADMIN ONLY: Create a New Table
+ * Register a new dining table (Admin)
  */
 router.post("/", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { tableNumber, capacity } = req.body;
-
-    if (!tableNumber) {
-      return res.status(400).json({ message: "Table number is required" });
-    }
-
     const num = parseInt(tableNumber, 10);
-    const cap = parseInt(capacity, 10) || 4;
+
+    if (!num || num < 1) {
+      return res.status(400).json({ message: "Valid table number required." });
+    }
 
     const existing = await Table.findOne({ tableNumber: num });
     if (existing) {
-      return res.status(400).json({ message: `Table #${num} already exists in the system` });
+      return res.status(400).json({ message: `Table #${num} already registered.` });
     }
 
-    const table = await Table.create({
+    const newTable = await Table.create({
       tableNumber: num,
-      capacity: cap,
+      capacity: parseInt(capacity, 10) || 4,
       status: "available",
     });
 
-    res.status(201).json({ message: "Table generated successfully", table });
+    res.status(201).json({
+      message: `Table #${num} registered successfully with QR code!`,
+      data: newTable,
+    });
   } catch (error) {
     console.error("Create table error:", error);
-    res.status(500).json({ message: "Failed to create table" });
+    res.status(500).json({ message: "Failed to create table." });
   }
 });
 
 /**
- * PATCH /api/tables/:tableNumber - ADMIN ONLY: Update Table
+ * Get details for a specific table by number
  */
-router.patch("/:tableNumber", authenticateToken, requireAdmin, async (req, res) => {
+router.get("/:tableNumber", async (req, res) => {
   try {
-    const { tableNumber } = req.params;
-    const { status, capacity } = req.body;
+    const tableNumber = parseInt(req.params.tableNumber, 10);
+    const table = await Table.findOne({ tableNumber });
+
+    if (!table) {
+      return res.status(404).json({ message: `Table #${tableNumber} not found.` });
+    }
+
+    const currentOrders = await Order.find({
+      tableNumber,
+      orderType: "dine-in",
+      status: { $in: ["pending", "preparing", "ready"] },
+    }).sort({ createdAt: -1 });
+
+    res.json({
+      data: {
+        ...table.toJSON(),
+        currentOrders,
+      },
+    });
+  } catch (error) {
+    console.error("Get table error:", error);
+    res.status(500).json({ message: "Failed to fetch table details." });
+  }
+});
+
+/**
+ * Update table status (Admin)
+ */
+router.put("/:tableNumber/status", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const tableNumber = parseInt(req.params.tableNumber, 10);
+    const { status } = req.body;
+
+    if (!["available", "occupied", "reserved"].includes(status)) {
+      return res.status(400).json({ message: "Invalid table status." });
+    }
 
     const updated = await Table.findOneAndUpdate(
-      { tableNumber: parseInt(tableNumber, 10) },
-      { $set: { ...(status && { status }), ...(capacity && { capacity: parseInt(capacity, 10) }) } },
+      { tableNumber },
+      { status },
       { new: true }
     );
 
     if (!updated) {
-      return res.status(404).json({ message: "Table not found" });
+      return res.status(404).json({ message: `Table #${tableNumber} not found.` });
     }
 
-    res.json({ message: "Table updated", table: updated });
+    res.json({
+      message: `Table #${tableNumber} is now marked ${status}.`,
+      data: updated,
+    });
   } catch (error) {
-    res.status(500).json({ message: "Failed to update table" });
+    console.error("Update table status error:", error);
+    res.status(500).json({ message: "Failed to update table status." });
   }
 });
 
 /**
- * DELETE /api/tables/:tableNumber - ADMIN ONLY: Delete Table
+ * Delete a table (Admin)
  */
 router.delete("/:tableNumber", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const { tableNumber } = req.params;
-    await Table.findOneAndDelete({ tableNumber: parseInt(tableNumber, 10) });
-    res.json({ message: `Table #${tableNumber} removed successfully` });
+    const tableNumber = parseInt(req.params.tableNumber, 10);
+    const deleted = await Table.findOneAndDelete({ tableNumber });
+
+    if (!deleted) {
+      return res.status(404).json({ message: `Table #${tableNumber} not found.` });
+    }
+
+    res.json({ message: `Table #${tableNumber} removed from floor plan.` });
   } catch (error) {
-    res.status(500).json({ message: "Failed to delete table" });
+    console.error("Delete table error:", error);
+    res.status(500).json({ message: "Failed to delete table." });
   }
 });
 

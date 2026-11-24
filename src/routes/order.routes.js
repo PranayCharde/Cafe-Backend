@@ -1,309 +1,297 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const Order = require("../models/Order");
 const User = require("../models/User");
-const { authenticateToken, optionalToken, requireAdmin } = require("../middleware/auth");
+const Table = require("../models/Table");
+const { authenticateToken, requireAdmin, optionalToken } = require("../middleware/auth");
 
-module.exports = function (io) {
+module.exports = function createOrderRoutes(io) {
   const router = express.Router();
 
   /**
-   * POST /api/orders - Place a New Order
+   * Place a new order (Dine-in from QR table or Takeaway/Delivery)
    */
-  router.post("/", optionalToken, async (req, res) => {
+  router.post("/", async (req, res) => {
     try {
       const {
         customerName,
         mobileNumber,
         email,
         tableNumber,
-        orderType,
-        paymentMode,
-        totalAmount,
-        notes,
-        items,
+        orderType = "dine-in",
+        items = [],
+        paymentMode = "UPI",
+        notes = "",
+        deliveryAddress = "",
+        specialInstructions = "",
       } = req.body;
 
-      if (!customerName || !mobileNumber || !items || !items.length) {
-        return res.status(400).json({ message: "Missing required order details" });
+      if (!customerName || !mobileNumber) {
+        return res.status(400).json({ message: "Customer name and mobile number are required." });
       }
 
-      // Find or create customer
-      let user = null;
-      if (req.user) {
-        user = await User.findById(req.user.id);
-      } else if (mobileNumber) {
-        user = await User.findOne({ phone: mobileNumber.trim() });
-        if (!user) {
-          user = await User.create({
-            name: customerName.trim(),
-            phone: mobileNumber.trim(),
-            email: email ? email.trim() : null,
-            role: "customer",
-          });
-        }
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ message: "At least one item is required to place an order." });
       }
 
-      const order = await Order.create({
-        userId: user ? user._id : null,
-        customerName: customerName.trim(),
-        mobileNumber: mobileNumber.trim(),
-        email: email ? email.trim() : user?.email || null,
-        tableNumber: tableNumber ? parseInt(tableNumber, 10) : null,
-        orderType: orderType || (tableNumber ? "dine-in" : "delivery"),
-        paymentMode: paymentMode || "UPI",
-        totalAmount: parseFloat(totalAmount),
-        notes: notes || "",
-        status: "pending",
-        items: items.map((it) => ({
-          id: it.id || it.productId,
-          productId: it.productId || it.id,
+      if (orderType === "dine-in" && !tableNumber) {
+        return res.status(400).json({ message: "Table number is required for dine-in orders." });
+      }
+
+      // Upsert Customer User
+      let user = await User.findOne({ phone: mobileNumber.trim() });
+      if (!user) {
+        user = await User.create({
+          name: customerName.trim(),
+          phone: mobileNumber.trim(),
+          email: email ? email.trim() : null,
+          role: "customer",
+        });
+      } else if (email && !user.email) {
+        user.email = email.trim();
+        await user.save();
+      }
+
+      // Calculate total amount
+      let calculatedTotal = 0;
+      const formattedItems = items.map((it, idx) => {
+        const itemPrice = parseFloat(it.price) || 0;
+        const itemQty = parseInt(it.quantity, 10) || 1;
+        calculatedTotal += itemPrice * itemQty;
+        return {
+          id: idx + 1,
+          productId: it.productId || it.id || idx + 1,
           name: it.name,
-          price: String(it.price),
-          quantity: parseInt(it.quantity, 10) || 1,
-        })),
+          price: String(itemPrice),
+          quantity: itemQty,
+          notes: it.notes || "",
+        };
       });
 
-      // Get count of orders placed by this customer
-      const customerOrdersCount = await Order.countDocuments({ mobileNumber: mobileNumber.trim() });
-
-      const orderPayload = {
-        id: order.orderId,
-        _id: order._id,
-        orderId: order.orderId,
-        customerName: order.customerName,
-        mobileNumber: order.mobileNumber,
-        email: order.email,
-        tableNumber: order.tableNumber,
-        orderType: order.orderType,
-        paymentMode: order.paymentMode,
-        totalAmount: order.totalAmount,
-        notes: order.notes,
-        status: order.status,
-        items: order.items,
-        totalCustomerOrdersCount: customerOrdersCount,
-        registeredUserName: user ? user.name : order.customerName,
-        registeredPhone: user ? user.phone : order.mobileNumber,
-        registeredEmail: user ? user.email : order.email,
-        customerSince: user ? user.createdAt : order.createdAt,
-        createdAt: order.createdAt,
-        updatedAt: order.updatedAt,
+      const orderData = {
+        userId: user._id,
+        customerName: customerName.trim(),
+        mobileNumber: mobileNumber.trim(),
+        email: email ? email.trim() : user.email || "",
+        tableNumber: orderType === "dine-in" ? parseInt(tableNumber, 10) : null,
+        orderType,
+        paymentMode,
+        totalAmount: calculatedTotal,
+        notes: notes || specialInstructions || "",
+        status: "pending",
+        items: formattedItems,
       };
 
-      // 🔥 EMIT REAL-TIME SOCKET EVENT TO ALL ADMINS 🔥
+      const placedOrder = await Order.create(orderData);
+
+      // If dine-in, mark table occupied
+      if (orderType === "dine-in" && tableNumber) {
+        await Table.findOneAndUpdate(
+          { tableNumber: parseInt(tableNumber, 10) },
+          { status: "occupied" }
+        );
+      }
+
+      const responsePayload = {
+        ...placedOrder.toJSON(),
+        user: {
+          id: user._id,
+          name: user.name,
+          phone: user.phone,
+          email: user.email,
+        },
+      };
+
+      // Broadcast real-time event to Admin Panel
       if (io) {
-        io.emit("new_order", orderPayload);
-        console.log(`[Socket.io] Emitted new_order #${order.orderId} for Table #${order.tableNumber}`);
+        console.log(`📡 Emitting 'new_order' event for Order #${placedOrder.orderId}`);
+        io.to("admin_room").emit("new_order", responsePayload);
+        io.emit("new_order", responsePayload); // broadcast to all connected admins
       }
 
       res.status(201).json({
-        message: "Order placed successfully",
-        order: orderPayload,
+        message: "Order placed successfully!",
+        data: responsePayload,
       });
     } catch (error) {
-      console.error("Order creation error:", error);
-      res.status(500).json({ message: "Failed to place order" });
+      console.error("Place order error:", error);
+      res.status(500).json({ message: "Failed to place order.", error: error.message });
     }
   });
 
   /**
-   * GET /api/orders - ADMIN ONLY: Get All Orders
+   * Get orders (Admin gets all, or customer filters by own mobile/table)
    */
-  router.get("/", authenticateToken, requireAdmin, async (req, res) => {
+  router.get("/", optionalToken, async (req, res) => {
     try {
-      const { status, tableNumber, search, orderType } = req.query;
+      const { status, tableNumber, mobileNumber } = req.query;
+      const isAdmin = req.user && req.user.role === "admin";
 
-      const filter = {};
-
-      if (status && status !== "all") {
-        filter.status = status;
+      // Security check: only authenticated admins can view all orders
+      if (!isAdmin && !mobileNumber && !tableNumber) {
+        return res.status(403).json({
+          message: "Access restricted. Administrator privileges required to view all orders.",
+        });
       }
 
-      if (tableNumber && tableNumber !== "all") {
-        filter.tableNumber = parseInt(tableNumber, 10);
-      }
-
-      if (orderType && orderType !== "all") {
-        filter.orderType = orderType;
-      }
-
-      if (search) {
-        const isNum = !isNaN(parseInt(search, 10));
-        filter.$or = [
-          { customerName: { $regex: search, $options: "i" } },
-          { mobileNumber: { $regex: search, $options: "i" } },
-          ...(isNum ? [{ orderId: parseInt(search, 10) }] : []),
-        ];
-      }
+      if (status) filter.status = status;
+      if (tableNumber) filter.tableNumber = parseInt(tableNumber, 10);
+      if (mobileNumber) filter.mobileNumber = mobileNumber.trim();
 
       const orders = await Order.find(filter)
         .populate("userId", "name phone email createdAt")
         .sort({ createdAt: -1 });
 
-      // Transform with customer info
-      const formatted = await Promise.all(
-        orders.map(async (ord) => {
-          const count = await Order.countDocuments({ mobileNumber: ord.mobileNumber });
+      const enriched = orders.map((o) => {
+        const obj = o.toJSON();
+        return {
+          ...obj,
+          customerPhone: o.mobileNumber,
+          customerEmail: o.email || (o.userId ? o.userId.email : ""),
+          user: o.userId
+            ? {
+                id: o.userId._id,
+                name: o.userId.name,
+                phone: o.userId.phone,
+                email: o.userId.email,
+              }
+            : null,
+        };
+      });
 
-          return {
-            id: ord.orderId,
-            _id: ord._id,
-            orderId: ord.orderId,
-            customerName: ord.customerName,
-            mobileNumber: ord.mobileNumber,
-            email: ord.email,
-            tableNumber: ord.tableNumber,
-            orderType: ord.orderType,
-            paymentMode: ord.paymentMode,
-            totalAmount: ord.totalAmount,
-            notes: ord.notes,
-            status: ord.status,
-            items: ord.items,
-            totalCustomerOrdersCount: count,
-            registeredUserName: ord.userId ? ord.userId.name : ord.customerName,
-            registeredPhone: ord.userId ? ord.userId.phone : ord.mobileNumber,
-            registeredEmail: ord.userId ? ord.userId.email : ord.email,
-            customerSince: ord.userId ? ord.userId.createdAt : ord.createdAt,
-            createdAt: ord.createdAt,
-            updatedAt: ord.updatedAt,
-          };
-        })
-      );
-
-      res.json({ orders: formatted });
+      res.json({ data: enriched });
     } catch (error) {
       console.error("Get orders error:", error);
-      res.status(500).json({ message: "Failed to fetch orders" });
+      res.status(500).json({ message: "Failed to fetch orders." });
     }
   });
 
   /**
-   * GET /api/orders/my-orders - Customer: View My Orders
+   * Get order by ID (orderId number or Mongo _id)
    */
-  router.get("/my-orders", authenticateToken, async (req, res) => {
+  router.get("/:id", async (req, res) => {
     try {
-      const orders = await Order.find({
-        $or: [{ userId: req.user.id }, { mobileNumber: req.user.phone }],
-      }).sort({ createdAt: -1 });
+      const { id } = req.params;
+      let order = null;
 
-      res.json({ orders });
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch orders" });
-    }
-  });
+      if (mongoose.Types.ObjectId.isValid(id)) {
+        order = await Order.findById(id).populate("userId", "name phone email");
+      }
+      if (!order) {
+        order = await Order.findOne({ orderId: parseInt(id, 10) || -1 }).populate(
+          "userId",
+          "name phone email"
+        );
+      }
 
-  /**
-   * GET /api/orders/:id - ADMIN ONLY: Get Order Details & Customer History
-   */
-  router.get("/:id", authenticateToken, requireAdmin, async (req, res) => {
-    try {
-      const isNumeric = !isNaN(parseInt(req.params.id, 10));
-      const query = isNumeric ? { orderId: parseInt(req.params.id, 10) } : { _id: req.params.id };
-
-      const order = await Order.findOne(query).populate("userId", "name phone email createdAt");
       if (!order) {
         return res.status(404).json({ message: "Order not found" });
       }
 
-      const previousOrders = await Order.find({
-        mobileNumber: order.mobileNumber,
-        _id: { $ne: order._id },
-      })
-        .sort({ createdAt: -1 })
-        .limit(5);
-
-      res.json({ order, previousOrders });
+      res.json({ data: order });
     } catch (error) {
-      res.status(500).json({ message: "Failed to fetch order details" });
+      console.error("Get order error:", error);
+      res.status(500).json({ message: "Failed to fetch order details." });
     }
   });
 
   /**
-   * PATCH /api/orders/:id/status - ADMIN ONLY: Update Order Status
+   * Update order status (Admin)
    */
-  router.patch("/:id/status", authenticateToken, requireAdmin, async (req, res) => {
+  router.put("/:id/status", authenticateToken, requireAdmin, async (req, res) => {
     try {
       const { id } = req.params;
       const { status } = req.body;
 
       const validStatuses = ["pending", "preparing", "ready", "completed", "cancelled"];
       if (!validStatuses.includes(status)) {
-        return res.status(400).json({ message: "Invalid status value" });
+        return res.status(400).json({ message: "Invalid order status." });
       }
 
-      const isNumeric = !isNaN(parseInt(id, 10));
-      const query = isNumeric ? { orderId: parseInt(id, 10) } : { _id: id };
+      let order = null;
+      if (mongoose.Types.ObjectId.isValid(id)) {
+        order = await Order.findById(id);
+      }
+      if (!order) {
+        order = await Order.findOne({ orderId: parseInt(id, 10) || -1 });
+      }
 
-      const updated = await Order.findOneAndUpdate(
-        query,
-        { $set: { status } },
-        { new: true }
-      ).populate("userId", "name phone email createdAt");
-
-      if (!updated) {
+      if (!order) {
         return res.status(404).json({ message: "Order not found" });
       }
 
-      const count = await Order.countDocuments({ mobileNumber: updated.mobileNumber });
+      order.status = status;
+      await order.save();
 
-      const payload = {
-        id: updated.orderId,
-        _id: updated._id,
-        orderId: updated.orderId,
-        customerName: updated.customerName,
-        mobileNumber: updated.mobileNumber,
-        email: updated.email,
-        tableNumber: updated.tableNumber,
-        orderType: updated.orderType,
-        paymentMode: updated.paymentMode,
-        totalAmount: updated.totalAmount,
-        notes: updated.notes,
-        status: updated.status,
-        items: updated.items,
-        totalCustomerOrdersCount: count,
-        registeredUserName: updated.userId ? updated.userId.name : updated.customerName,
-        registeredPhone: updated.userId ? updated.userId.phone : updated.mobileNumber,
-        registeredEmail: updated.userId ? updated.userId.email : updated.email,
-        customerSince: updated.userId ? updated.userId.createdAt : updated.createdAt,
-        createdAt: updated.createdAt,
-        updatedAt: updated.updatedAt,
+      // If dine-in order is completed or cancelled, check table status
+      if (order.orderType === "dine-in" && order.tableNumber) {
+        if (["completed", "cancelled"].includes(status)) {
+          const remainingActive = await Order.countDocuments({
+            tableNumber: order.tableNumber,
+            orderType: "dine-in",
+            status: { $in: ["pending", "preparing", "ready"] },
+          });
+
+          if (remainingActive === 0) {
+            await Table.findOneAndUpdate(
+              { tableNumber: order.tableNumber },
+              { status: "available" }
+            );
+          }
+        }
+      }
+
+      const updatedPayload = {
+        ...order.toJSON(),
+        customerPhone: order.mobileNumber,
+        customerEmail: order.email,
       };
 
-      // 🔥 EMIT REAL-TIME SOCKET EVENT 🔥
+      // Emit real-time status update to Admin Panel
       if (io) {
-        io.emit("order_status_updated", payload);
-        console.log(`[Socket.io] Emitted order_status_updated #${payload.id} -> ${status}`);
+        console.log(`📡 Emitting 'order_status_updated' event for Order #${order.orderId}: ${status}`);
+        io.to("admin_room").emit("order_status_updated", updatedPayload);
+        io.emit("order_status_updated", updatedPayload);
       }
 
       res.json({
-        message: `Order #${payload.id} marked as ${status}`,
-        order: payload,
+        message: `Order status changed to ${status}`,
+        data: updatedPayload,
       });
     } catch (error) {
-      console.error("Status update error:", error);
-      res.status(500).json({ message: "Failed to update status" });
+      console.error("Update order status error:", error);
+      res.status(500).json({ message: "Failed to update order status." });
     }
   });
 
   /**
-   * DELETE /api/orders/:id - ADMIN ONLY: Delete an Order
+   * Delete order (Admin)
    */
   router.delete("/:id", authenticateToken, requireAdmin, async (req, res) => {
     try {
-      const isNumeric = !isNaN(parseInt(req.params.id, 10));
-      const query = isNumeric ? { orderId: parseInt(req.params.id, 10) } : { _id: req.params.id };
+      const { id } = req.params;
+      let deleted = null;
 
-      const deleted = await Order.findOneAndDelete(query);
+      if (mongoose.Types.ObjectId.isValid(id)) {
+        deleted = await Order.findByIdAndDelete(id);
+      }
+      if (!deleted) {
+        deleted = await Order.findOneAndDelete({ orderId: parseInt(id, 10) || -1 });
+      }
+
       if (!deleted) {
         return res.status(404).json({ message: "Order not found" });
       }
 
       if (io) {
-        io.emit("order_deleted", { id: deleted.orderId });
+        io.to("admin_room").emit("order_deleted", { id: deleted.orderId || deleted._id });
+        io.emit("order_deleted", { id: deleted.orderId || deleted._id });
       }
 
-      res.json({ message: `Order #${deleted.orderId} removed` });
+      res.json({ message: "Order deleted successfully" });
     } catch (error) {
-      res.status(500).json({ message: "Failed to delete order" });
+      console.error("Delete order error:", error);
+      res.status(500).json({ message: "Failed to delete order." });
     }
   });
 
