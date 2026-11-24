@@ -135,6 +135,7 @@ module.exports = function createOrderRoutes(io) {
         });
       }
 
+      const filter = {};
       if (status) filter.status = status;
       if (tableNumber) filter.tableNumber = parseInt(tableNumber, 10);
       if (mobileNumber) filter.mobileNumber = mobileNumber.trim();
