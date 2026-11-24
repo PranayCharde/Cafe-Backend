@@ -2,14 +2,16 @@ function setupSocket(io) {
   io.on("connection", (socket) => {
     console.log(`[Socket.io] Client connected: ${socket.id}`);
 
-    // Join admin channel
+    // Join admin channels
     socket.on("join_admin", () => {
+      socket.join("admin_room");
       socket.join("admins");
-      console.log(`[Socket.io] Client ${socket.id} joined admins room`);
+      console.log(`[Socket.io] Client ${socket.id} joined admin_room & admins`);
     });
 
-    // Leave admin channel
+    // Leave admin channels
     socket.on("leave_admin", () => {
+      socket.leave("admin_room");
       socket.leave("admins");
     });
 
@@ -20,4 +22,3 @@ function setupSocket(io) {
 }
 
 module.exports = setupSocket;
-

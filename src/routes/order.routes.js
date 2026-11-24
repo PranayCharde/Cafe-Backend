@@ -106,6 +106,7 @@ module.exports = function createOrderRoutes(io) {
       if (io) {
         console.log(`📡 Emitting 'new_order' event for Order #${placedOrder.orderId}`);
         io.to("admin_room").emit("new_order", responsePayload);
+        io.to("admins").emit("new_order", responsePayload);
         io.emit("new_order", responsePayload); // broadcast to all connected admins
       }
 
@@ -251,6 +252,7 @@ module.exports = function createOrderRoutes(io) {
       if (io) {
         console.log(`📡 Emitting 'order_status_updated' event for Order #${order.orderId}: ${status}`);
         io.to("admin_room").emit("order_status_updated", updatedPayload);
+        io.to("admins").emit("order_status_updated", updatedPayload);
         io.emit("order_status_updated", updatedPayload);
       }
 
@@ -285,6 +287,7 @@ module.exports = function createOrderRoutes(io) {
 
       if (io) {
         io.to("admin_room").emit("order_deleted", { id: deleted.orderId || deleted._id });
+        io.to("admins").emit("order_deleted", { id: deleted.orderId || deleted._id });
         io.emit("order_deleted", { id: deleted.orderId || deleted._id });
       }
 
