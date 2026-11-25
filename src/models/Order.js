@@ -16,7 +16,7 @@ const orderSchema = new mongoose.Schema(
     mobileNumber: { type: String, required: true, trim: true },
     email: { type: String, trim: true },
     tableNumber: { type: Number },
-    orderType: { type: String, enum: ["dine-in", "delivery"], default: "dine-in" },
+    orderType: { type: String, enum: ["dine-in", "takeaway", "delivery"], default: "dine-in" },
     paymentMode: { type: String, default: "UPI" },
     totalAmount: { type: Number, required: true },
     notes: { type: String, default: "" },

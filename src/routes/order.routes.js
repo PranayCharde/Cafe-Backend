@@ -9,7 +9,7 @@ module.exports = function createOrderRoutes(io) {
   const router = express.Router();
 
   /**
-   * Place a new order (Dine-in from QR table or Takeaway/Delivery)
+   * Place a new order (Dine-in at table or Takeaway counter pickup)
    */
   router.post("/", async (req, res) => {
     try {
@@ -22,7 +22,6 @@ module.exports = function createOrderRoutes(io) {
         items = [],
         paymentMode = "UPI",
         notes = "",
-        deliveryAddress = "",
         specialInstructions = "",
       } = req.body;
 
@@ -34,7 +33,10 @@ module.exports = function createOrderRoutes(io) {
         return res.status(400).json({ message: "At least one item is required to place an order." });
       }
 
-      if (orderType === "dine-in" && !tableNumber) {
+      // Cafe order types: Dine-in (with table number) or Takeaway (counter pickup)
+      const normalizedOrderType = orderType === "dine-in" ? "dine-in" : "takeaway";
+
+      if (normalizedOrderType === "dine-in" && !tableNumber) {
         return res.status(400).json({ message: "Table number is required for dine-in orders." });
       }
 
@@ -73,8 +75,8 @@ module.exports = function createOrderRoutes(io) {
         customerName: customerName.trim(),
         mobileNumber: mobileNumber.trim(),
         email: email ? email.trim() : user.email || "",
-        tableNumber: orderType === "dine-in" ? parseInt(tableNumber, 10) : null,
-        orderType,
+        tableNumber: normalizedOrderType === "dine-in" ? parseInt(tableNumber, 10) : null,
+        orderType: normalizedOrderType,
         paymentMode,
         totalAmount: calculatedTotal,
         notes: notes || specialInstructions || "",
@@ -85,7 +87,7 @@ module.exports = function createOrderRoutes(io) {
       const placedOrder = await Order.create(orderData);
 
       // If dine-in, mark table occupied
-      if (orderType === "dine-in" && tableNumber) {
+      if (normalizedOrderType === "dine-in" && tableNumber) {
         await Table.findOneAndUpdate(
           { tableNumber: parseInt(tableNumber, 10) },
           { status: "occupied" }
@@ -125,7 +127,7 @@ module.exports = function createOrderRoutes(io) {
    */
   router.get("/", optionalToken, async (req, res) => {
     try {
-      const { status, tableNumber, mobileNumber } = req.query;
+      const { status, tableNumber, mobileNumber, orderType } = req.query;
       const isAdmin = req.user && req.user.role === "admin";
 
       // Security check: only authenticated admins can view all orders
@@ -139,6 +141,13 @@ module.exports = function createOrderRoutes(io) {
       if (status) filter.status = status;
       if (tableNumber) filter.tableNumber = parseInt(tableNumber, 10);
       if (mobileNumber) filter.mobileNumber = mobileNumber.trim();
+      if (orderType && orderType !== "all") {
+        if (orderType === "takeaway" || orderType === "delivery") {
+          filter.orderType = { $in: ["takeaway", "delivery"] };
+        } else {
+          filter.orderType = orderType;
+        }
+      }
 
       const orders = await Order.find(filter)
         .populate("userId", "name phone email createdAt")
